@@ -34,6 +34,104 @@ import shlex, subprocess, os
 import paho.mqtt.client as mqtt
 import json
 
+import argparse
+import contextlib
+import io
+import os
+import queue
+import threading
+import time
+
+@contextlib.contextmanager
+def stopwatch(message):
+    try:
+        print(f'{message}...')
+        begin = time.monotonic()
+        yield
+    finally:
+        end = time.monotonic()
+        print(f'{message} done. ({end - begin}s)')
+
+class Service:
+
+    def __init__(self):
+        self._requests = queue.Queue()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        while True:
+            request = self._requests.get()
+            if request is None:
+                self.shutdown()
+                break
+            self.process(request)
+            self._requests.task_done()
+
+    def process(self, request):
+        pass
+
+    def shutdown(self):
+        pass
+
+    def submit(self, request):
+        self._requests.put(request)
+
+    def close(self):
+        self._requests.put(None)
+        self._thread.join()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, exc_tb):
+        self.close()
+
+class Photographer(Service):
+    """Saves photographs to disk."""
+
+    def __init__(self, format, folder, min_picture_interval = 30):
+        super().__init__()
+        assert format in ('jpeg', 'bmp', 'png')
+
+        # self._font = ImageFont.truetype(FONT_FILE, size=25)
+        self._faces = ([], (0, 0))
+        self._format = format
+        self._folder = folder
+        self._last_picture_taken_timestamp = 0
+        self.__min_picture_interval = min_picture_interval
+
+    def _make_filename(self, timestamp, annotated):
+        path = '%s/%s_annotated.%s' if annotated else '%s/%s.%s'
+        return os.path.expanduser(path % (self._folder, timestamp, self._format))
+
+    def _make_symlink_filename(self, annotated):
+        path = '%s/latest_annotated.%s' if annotated else '%s/latest.%s'
+        return os.path.expanduser(path % (self._folder, self._format))
+
+    def process(self, message):
+        now = time.time()
+
+        if now - self._last_picture_taken_timestamp > self.__min_picture_interval:
+            camera = message
+            timestamp = time.strftime('%Y-%m-%d_%H.%M.%S')
+
+            stream = io.BytesIO()
+            with stopwatch('Taking photo'):
+                camera.capture(stream, format=self._format, use_video_port=True)
+
+            filename = self._make_filename(timestamp, annotated=False)
+            symlink = self._make_symlink_filename(annotated=False)
+            with stopwatch('Saving original %s' % filename):
+                stream.seek(0)
+                with open(filename, 'wb') as file:
+                    print(f'saving photo {filename}')
+                    file.write(stream.read())
+                    print(f'symlink photo {symlink}')
+                    os.remove(symlink)
+                    os.symlink(filename, symlink)
+            self._last_picture_taken_timestamp = now
+
 class ObjectEventPublisher():
     def __init__(self, mqtt_client_name, mqtt_topic, min_publish_interval) -> None:
         self.__mqtt_server_connected = False
@@ -117,7 +215,15 @@ def main():
         help='MQTT server port')
     parser.add_argument('--mqtt_username', default='user', help='MQTT username')
     parser.add_argument('--mqtt_password', default='password', help='MQTT password')
+    parser.add_argument('--image_folder', default='~/Pictures', help='Folder to save captured images')
+    parser.add_argument('--image_format', default='jpeg',
+                        choices=('jpeg', 'bmp', 'png'),
+                        help='Format of captured images')
+    parser.add_argument('--min_picture_interval', default=30,
+        help='Min. interval between saving picture of detected object')
     args = parser.parse_args()
+
+    photographer = Photographer(args.image_format, args.image_folder, args.min_picture_interval)
 
     object_event_publisher = ObjectEventPublisher(args.mqtt_client_name, args.mqtt_topic, args.min_mqtt_publish_interval)
     object_event_publisher.connect(args.mqtt_server_host, args.mqtt_server_port, args.mqtt_username, args.mqtt_password)
@@ -153,7 +259,8 @@ def main():
                 #     print(object_detection.Object._LABELS[object_class.kind])
                 # update person_detected flag if different from previous value
                 object_event_publisher.publish(object_detection.Object.PERSON, person_detected)
-                print(f"Person detected")
+                # print(f"Person detected")
+                photographer.submit(camera)
             
             time.sleep(1)
 
