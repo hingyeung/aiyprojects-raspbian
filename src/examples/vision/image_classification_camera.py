@@ -90,7 +90,7 @@ class Service:
 class Photographer(Service):
     """Saves photographs to disk."""
 
-    def __init__(self, format, folder, min_picture_interval = 30):
+    def __init__(self, format, folder, image_name_prefix, min_picture_interval = 30):
         super().__init__()
         assert format in ('jpeg', 'bmp', 'png')
 
@@ -100,14 +100,15 @@ class Photographer(Service):
         self._folder = folder
         self._last_picture_taken_timestamp = 0
         self.__min_picture_interval = min_picture_interval
+        self.__image_name_prefix = image_name_prefix
 
     def _make_filename(self, timestamp, annotated):
-        path = '%s/%s_annotated.%s' if annotated else '%s/%s.%s'
-        return os.path.expanduser(path % (self._folder, timestamp, self._format))
+        path = '%s/%s_%s_annotated.%s' if annotated else '%s/%s_%s.%s'
+        return os.path.expanduser(path % (self._folder, self.__image_name_prefix, timestamp, self._format))
 
     def _make_symlink_filename(self, annotated):
-        path = '%s/latest_annotated.%s' if annotated else '%s/latest.%s'
-        return os.path.expanduser(path % (self._folder, self._format))
+        path = '%s/latest_%s_annotated.%s' if annotated else '%s/latest_%s.%s'
+        return os.path.expanduser(path % (self._folder, self.__image_name_prefix, self._format))
 
     def process(self, message):
         now = time.time()
@@ -128,7 +129,8 @@ class Photographer(Service):
                     print(f'saving photo {filename}')
                     file.write(stream.read())
                     print(f'symlink photo {symlink}')
-                    os.remove(symlink)
+                    if (os.path.islink(symlink) or os.path.isfile(symlink)):
+                        os.remove(symlink)
                     os.symlink(filename, symlink)
             self._last_picture_taken_timestamp = now
 
@@ -219,11 +221,14 @@ def main():
     parser.add_argument('--image_format', default='jpeg',
                         choices=('jpeg', 'bmp', 'png'),
                         help='Format of captured images')
-    parser.add_argument('--min_picture_interval', default=30,
-        help='Min. interval between saving picture of detected object')
+    parser.add_argument('--min_person_picture_interval', default=30,
+        help='Min. interval between saving picture of detected person')
+    parser.add_argument('--min_feed_picture_interval', default=300,
+        help='Min. interval between saving picture of the camera feed')
     args = parser.parse_args()
 
-    photographer = Photographer(args.image_format, args.image_folder, args.min_picture_interval)
+    person_photographer = Photographer(args.image_format, args.image_folder, "feed", args.min_person_picture_interval)
+    feed_photographer = Photographer(args.image_format, args.image_folder, "feed", args.min_feed_picture_interval)
 
     object_event_publisher = ObjectEventPublisher(args.mqtt_client_name, args.mqtt_topic, args.min_mqtt_publish_interval)
     object_event_publisher.connect(args.mqtt_server_host, args.mqtt_server_port, args.mqtt_username, args.mqtt_password)
@@ -257,12 +262,14 @@ def main():
                 # camera.annotate_text = '%s (%.2f)' % classes[0]
                 # for object_class in classes:
                 #     print(object_detection.Object._LABELS[object_class.kind])
+                # print(f"Person detected")
+                person_photographer.submit(camera)
                 # update person_detected flag if different from previous value
                 object_event_publisher.publish(object_detection.Object.PERSON, person_detected)
-                # print(f"Person detected")
-                photographer.submit(camera)
             
-            time.sleep(1)
+            time.sleep(0.5)
+            # take a snapshot from the feed for preview
+            feed_photographer.submit(camera)
 
 if __name__ == '__main__':
     main()
